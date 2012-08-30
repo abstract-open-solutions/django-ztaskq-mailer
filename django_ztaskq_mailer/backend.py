@@ -96,29 +96,33 @@ class MailSender(object):
             # sometimes.
             self.connection.close()
 
-    def _send(self, message):
-        assert isinstance(message, MessageWrapper)
-        message.send(self.connection)
-
     def send(self, messages):
-        results = {
-            'succesful': [],
-            'retried': [],
-            'failed': []
-        }
-        retries = defaultdict(list)
-        for message in messages:
-            self._send(message)
-            if message.sent:
-                results['succesful'].append(message)
-            else:
-                if message.must_resend():
-                    results['retried'].append(message)
-                    retries[message.resend_wait()].append(message)
-                else:
+        with self.lock:
+            self.connect()
+            results = {
+                'succesful': [],
+                'retried': [],
+                'failed': []
+            }
+            retries = defaultdict(list)
+            for message in messages:
+                try:
+                    message.send(self.connection)
+                except Exception, e: # pylint: disable=W0703
+                    message.errors.append(e)
                     results['failed'].append(message)
-        for delay, messages in retries.items():
-            sendmail.async(messages, ztaskq_delay=delay)
+                else:
+                    if message.sent:
+                        results['succesful'].append(message)
+                    else:
+                        if message.must_resend():
+                            results['retried'].append(message)
+                            retries[message.resend_wait()].append(message)
+                        else:
+                            results['failed'].append(message)
+            for delay, messages in retries.items():
+                sendmail.async(messages, ztaskq_delay=delay)
+            self.disconnect()
         return results
 
 

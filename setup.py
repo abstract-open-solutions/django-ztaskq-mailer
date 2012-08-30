@@ -28,6 +28,7 @@ setup(
     install_requires=[
         'setuptools',
         'Django',
-        'django_ztaskq>=0.3.0'
+        'django_ztaskq>=0.3.0',
+        'mock'
     ]
 )
