@@ -2,6 +2,7 @@ import smtplib
 from collections import defaultdict
 from socket import sslerror
 from threading import Lock
+from django.core.exceptions import ImproperlyConfigured
 from django.core.mail.backends.base import BaseEmailBackend
 from django.core.mail.utils import DNS_NAME
 from django.core.mail.message import sanitize_address
@@ -75,11 +76,28 @@ class MailSender(object):
         self.port = settings.EMAIL_PORT
         self.username = settings.EMAIL_HOST_USER
         self.password = settings.EMAIL_HOST_PASSWORD
+        self.use_ssl = getattr(settings, 'EMAIL_USE_SMTP_SSL', False)
         self.use_tls = settings.EMAIL_USE_TLS
+        if self.use_ssl and self.use_tls:
+            raise ImproperlyConfigured(
+                "You must set either EMAIL_USE_SMTP_SSL or "
+                "EMAIL_USE_TLS, not both"
+            )
 
     def connect(self):
-        self.connection = smtplib.SMTP(self.host, self.port,
-                                       local_hostname=DNS_NAME.get_fqdn())
+        kwargs = {
+            'local_hostname': DNS_NAME.get_fqdn()
+        }
+        if self.use_ssl:
+            keyfile = getattr(settings, 'EMAIL_SSL_KEYFILE', None)
+            certfile = getattr(settings, 'EMAIL_SSL_CERTFILE', None)
+            if keyfile:
+                kwargs['keyfile'] = keyfile
+            if certfile:
+                kwargs['certfile'] = certfile
+            self.connection = smtplib.SMTP_SSL(self.host, self.port, **kwargs)
+        else:
+            self.connection = smtplib.SMTP(self.host, self.port, **kwargs)
         if self.use_tls:
             self.connection.ehlo()
             self.connection.starttls()
