@@ -1,4 +1,6 @@
-import smtplib
+from hashlib import md5
+from smtplib import SMTP, SMTP_SSL, SMTPException
+from logging import getLogger
 from collections import defaultdict
 from socket import sslerror
 from threading import Lock
@@ -53,7 +55,7 @@ class MessageWrapper(object):
                 recipients,
                 email_message.message().as_string()
             )
-        except Exception, e: # pylint: disable=W0703
+        except SMTPException, e: # pylint: disable=W0703
             self.retries += 1
             self.errors.append(e)
         else:
@@ -66,6 +68,21 @@ class MessageWrapper(object):
 
     def resend_wait(self):
         return self.retry_step * (self.retry_base ** (self.retries - 1))
+
+    @property
+    def uid(self):
+        message = self.mail_message.message()
+        del message['Message-ID']
+        del message['Date']
+        return md5(message.as_string()).hexdigest()
+
+    def __repr__(self):
+        return "<MessageWrapper: from '%s' to '%s' (%s), retried %d>" % (
+            self.mail_message.from_email,
+            ", ".join(self.mail_message.recipients()),
+            self.uid,
+            self.retries
+        )
 
 
 class MailSender(object):
@@ -83,6 +100,7 @@ class MailSender(object):
                 "You must set either EMAIL_USE_SMTP_SSL or "
                 "EMAIL_USE_TLS, not both"
             )
+        self.connection = None
 
     def connect(self):
         kwargs = {
@@ -95,9 +113,9 @@ class MailSender(object):
                 kwargs['keyfile'] = keyfile
             if certfile:
                 kwargs['certfile'] = certfile
-            self.connection = smtplib.SMTP_SSL(self.host, self.port, **kwargs)
+            self.connection = SMTP_SSL(self.host, self.port, **kwargs)
         else:
-            self.connection = smtplib.SMTP(self.host, self.port, **kwargs)
+            self.connection = SMTP(self.host, self.port, **kwargs)
         if self.use_tls:
             self.connection.ehlo()
             self.connection.starttls()
@@ -107,39 +125,64 @@ class MailSender(object):
         return True
 
     def disconnect(self):
+        if self.connection is not None:
+            try:
+                self.connection.quit()
+            except sslerror:
+                # This happens when calling quit() on a TLS connection
+                # sometimes.
+                self.connection.close()
+
+    def send_message(self, message, results):
         try:
-            self.connection.quit()
-        except sslerror:
-            # This happens when calling quit() on a TLS connection
-            # sometimes.
-            self.connection.close()
+            message.send(self.connection)
+        except Exception, e: # pylint: disable=W0703
+            message.errors.append(e)
+            results['failed'].append(message)
+        else:
+            if message.sent:
+                results['succesful'].append(message)
+            else:
+                results['retry'].append(message)
 
     def send(self, messages):
+        logger = getLogger("django_ztaskq_mailer")
+        results = {
+            'succesful': [],
+            'retry': [],
+            'failed': []
+        }
+        retries = defaultdict(list)
         with self.lock:
-            self.connect()
-            results = {
-                'succesful': [],
-                'retried': [],
-                'failed': []
-            }
-            retries = defaultdict(list)
-            for message in messages:
-                try:
-                    message.send(self.connection)
-                except Exception, e: # pylint: disable=W0703
+            try:
+                self.connect()
+            except SMTPException, e:
+                for message in messages:
                     message.errors.append(e)
-                    results['failed'].append(message)
+                    message.retries += 1
+                    results['retry'].append(message)
+            else:
+                for message in messages:
+                    self.send_message(message, results)
+            while len(results['retry']) > 0:
+                message = results['retry'].pop()
+                if message.must_resend():
+                    retries[message.resend_wait()].append(message)
                 else:
-                    if message.sent:
-                        results['succesful'].append(message)
-                    else:
-                        if message.must_resend():
-                            results['retried'].append(message)
-                            retries[message.resend_wait()].append(message)
-                        else:
-                            results['failed'].append(message)
+                    results['failed'].append(message)
             for delay, messages in retries.items():
+                results['retry'].extend(messages)
                 sendmail.async(messages, ztaskq_delay=delay)
+            if len(results['failed']) > 0:
+                for message in results['failed']:
+                    logger.error(
+                        ("Could not send message "
+                         "because the following errors occurred:\n%s"
+                         "\nOriginal message was:\n%s\n\n") % (
+                            "\n".join([ str(m) for m in message.errors ]),
+                            message.mail_message.message().as_string(),
+                        )
+                    )
             self.disconnect()
         return results
 
