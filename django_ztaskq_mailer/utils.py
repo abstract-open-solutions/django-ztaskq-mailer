@@ -9,6 +9,7 @@ default_settings = {
 
 
 def get_setting(name):
-    mailer_settings = default_settings
-    mailer_settings.update(getattr(settings, 'ZTASKQ_MAILER', {}))
-    return mailer_settings[name]
+    return getattr(settings, 'ZTASKQ_MAILER', {}).get(
+        name,
+        default_settings[name]
+    )
