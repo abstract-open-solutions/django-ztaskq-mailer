@@ -158,3 +158,17 @@ class EmailBackend(BaseEmailBackend):
         sendmail.async([
             MessageWrapper(m) for m in messages
         ])
+
+
+def test_send(from_, to):
+    """This is merely used to be invoked from django shell
+    to troubleshoot failing servers
+    """
+    from django.core.mail.message import EmailMessage
+    mail = EmailMessage(
+        'Test message',
+        'Just a test message',
+        from_,
+        to=to
+    )
+    sendmail([ MessageWrapper(mail) ])
